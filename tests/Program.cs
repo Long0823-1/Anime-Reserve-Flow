@@ -36,6 +36,15 @@ bool timeout=false;try{await new LocalPipeTransport("AnimeReserveAbsent-"+Guid.N
 var manual=LocalStore.ManualAnime("  放送前の新作アニメ  ",new[]{1,50,-1,-3});Check(manual.Id==-4&&manual.Title=="放送前の新作アニメ","manual works have stable separate IDs and editable native titles");
 var zeroServer=new FakeEdcb {NoHits=true};var zeroEdcb=new Edcb(zeroServer);var futurePlan=plan with {AnimeId=manual.Id,AnimeTitle=manual.Title,Keyword=manual.Title};Check((await zeroEdcb.Preview(futurePlan)).Count==0,"not yet broadcast work can have zero EPG matches");
 uint futureId=await zeroEdcb.Register(futurePlan,root);Check(futureId==1&&zeroServer.Rules.Single().searchInfo.andKey==manual.Title&&zeroServer.Rules.Single().recSetting.BatFilePath==bat,"zero EPG matches still allow keyword auto-reservation with BAT");
+var bulkExisting=new List<Draft>{new(){Plan=plan with {Keyword="カスタム済み"},RegisteredId=99}};
+var bulkAnime=new[]{new Anime(1,"既存作品","","","TV",""),new Anime(2,"新作A","","","TV",""),new Anime(3,"新作B","","","TV",""),new Anime(2,"新作A","","","TV","")};
+var batch=DraftFactory.CreateMissing(bulkAnime,bulkExisting,allServices,rec,bat);
+Check(batch.Count==2&&batch.Select(d=>d.Plan.AnimeId).SequenceEqual(new[]{2,3}),"bulk add skips existing and duplicate IDs");
+Check(batch.All(d=>d.Plan.Services.Count==2&&d.Plan.Recording.BatFilePath==bat),"bulk add applies all channels and common BAT to every work");
+Check(bulkExisting.Count==1&&bulkExisting[0].RegisteredId==99&&bulkExisting[0].Plan.Keyword=="カスタム済み","bulk add preserves existing custom settings and registered IDs");
+batch[0].Plan.Recording.Priority=5;Check(batch[1].Plan.Recording.Priority==rec.Priority,"bulk recording snapshots are independent");
+Check(DraftFactory.CreateMissing(bulkAnime,bulkExisting.Concat(batch),allServices,rec,bat).Count==0,"repeating bulk add creates no duplicates");
+bool invalidBatch=false;try{DraftFactory.CreateMissing(new[]{new Anime(4,"valid","","","TV",""),new Anime(5,"","","","TV","")},bulkExisting,allServices,rec,bat);}catch(ArgumentException){invalidBatch=true;}Check(invalidBatch&&bulkExisting.Count==1&&bulkExisting[0].RegisteredId==99,"invalid bulk draft cannot partially modify selection");
 if(args.Contains("--live-catalog")){var live=await new Catalog(Path.Combine(root,"Live")).Fetch(2026,4);Check(live.Items.Count>0,"actual AniList season fetch");Console.WriteLine("LIVE CATALOG "+live.Items.Count+" works");}
 if(args.Contains("--read-edcb")){var local=new Edcb();var channels=await local.Services();var rules=await local.Rules();Check(channels.Count>0,"local EpgTimerSrv read-only pipe connection");Console.WriteLine("EDCB READ ONLY "+channels.Count+" channels / "+rules.Count+" rules");int folderArg=Array.IndexOf(args,"--edcb-folder");if(folderArg>=0){var real=RecordingPresets.Load(args[folderArg+1]);Check(real.Count>0,"actual EDCB recording presets read");}}
 Console.WriteLine("ALL PASS "+count+" fixtures "+root);

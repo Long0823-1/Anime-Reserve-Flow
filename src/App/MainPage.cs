@@ -13,7 +13,7 @@ public sealed class MainPage:ContentPage {
  static Border Card(View v)=>new(){Content=v,Padding=20,BackgroundColor=Colors.White,Stroke=Colors.Transparent,StrokeShape=new Microsoft.Maui.Controls.Shapes.RoundRectangle {CornerRadius=24}};
  void Save()=>LocalStore.Save(data,settings);
  public MainPage(){
-  data=Environment.GetCommandLineArgs().Contains("--qa")?Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Anime-Reserve-Flow","QA"):Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Anime-Reserve-Flow");settings=LocalStore.Load(data);catalog=new Catalog(Path.Combine(data,"Cache"));
+  var arguments=Environment.GetCommandLineArgs();int dataIndex=Array.IndexOf(arguments,"--data");data=dataIndex>=0&&dataIndex+1<arguments.Length?Path.GetFullPath(arguments[dataIndex+1]):arguments.Contains("--qa")?Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Anime-Reserve-Flow","QA"):Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Anime-Reserve-Flow");settings=LocalStore.Load(data);catalog=new Catalog(Path.Combine(data,"Cache"));
   if(settings.EdcbFolder.Length==0)try{settings.EdcbFolder=Path.GetDirectoryName(Process.GetProcessesByName("EpgTimerSrv").FirstOrDefault()?.MainModule?.FileName)??"";}catch{}
   Title="Anime Reserve Flow";Padding=28;year.Text=DateTime.Now.Year.ToString();quarter.SelectedIndex=(DateTime.Now.Month-1)/3;
   var grid=new Grid {RowDefinitions=new RowDefinitionCollection {new(GridLength.Auto),new(GridLength.Auto),new(GridLength.Star),new(GridLength.Auto)},RowSpacing=14};
@@ -28,7 +28,7 @@ public sealed class MainPage:ContentPage {
   string previousYear=year.Text??DateTime.Now.Year.ToString(),previousFilter=filter.Text??"";int previousQuarter=quarter.SelectedIndex;
   // Fresh controls prevent reusing WinUI handlers disposed when another section was shown.
   year=new Entry {Text=previousYear,WidthRequest=100,Keyboard=Keyboard.Numeric};quarter=new Picker {WidthRequest=160,ItemsSource=new[]{"冬（1～3月）","春（4～6月）","夏（7～9月）","秋（10～12月）"},SelectedIndex=previousQuarter};filter=new Entry {Text=previousFilter,Placeholder="作品名で絞り込み",WidthRequest=320};filter.Completed+=(_,_)=>ShowSeason();
-  body.Clear();body.Add(Card(Stack(Row(year,quarter,Btn("一覧を取得",()=>Fetch(true)),Btn("一覧になくても手入力で追加",AddManual)),Row(filter,Btn("絞り込み",()=>{ShowSeason();return Task.CompletedTask;})),Text("TV・短編TVアニメの放送開始クールを表示します。地域の放送日時はEDCBの番組表で確認します。",13))));
+  body.Clear();body.Add(Card(Stack(Row(year,quarter,Btn("一覧を取得",()=>Fetch(true)),Btn("一覧になくても手入力で追加",AddManual)),Row(filter,Btn("絞り込み",()=>{ShowSeason();return Task.CompletedTask;}),Btn("全"+anime.Count+"作品を追加",AddAll)),Text("TV・短編TVアニメの放送開始クールを表示します。全件追加は絞り込みに関係なく、取得したクール全体が対象です。",13))));
   var rows=anime.Where(a=>a.Title.Contains(filter.Text??"",StringComparison.OrdinalIgnoreCase)||a.Romaji.Contains(filter.Text??"",StringComparison.OrdinalIgnoreCase)).ToList();
   foreach(var a in rows){var existing=settings.Drafts.FirstOrDefault(d=>d.Plan.AnimeId==a.Id);Button? add=null;add=Btn(existing==null?"＋ 追加":"追加済み",async()=>{await QuickAdd(a);add!.Text="追加済み";});body.Add(Card(Stack(Text(a.Title,20),Text(a.Romaji,12),Row(add,Btn("設定を変更",()=>Edit(a,settings.Drafts.FirstOrDefault(d=>d.Plan.AnimeId==a.Id)))))));}
   if(rows.Count==0)body.Add(Text("一致する作品がありません。「一覧になくても手入力で追加」から登録できます。"));
@@ -40,6 +40,14 @@ public sealed class MainPage:ContentPage {
  }
  async Task AddManual(){var name=await DisplayPromptAsync("作品を手入力で追加","アニメ一覧・番組表にない作品も、検索条件として登録できます。作品名を入力してください。",accept:"追加",cancel:"戻る",maxLength:500,initialValue:filter.Text??"");if(name==null)return;var work=LocalStore.ManualAnime(name,settings.Drafts.Select(d=>d.Plan.AnimeId));await QuickAdd(work);Show();}
  async Task QuickAdd(Anime a){if(settings.Drafts.Any(d=>d.Plan.AnimeId==a.Id)){note.Text="この作品は追加済みです。";return;}if(services.Count==0||presets.Count==0)await Connect();var preset=presets[Math.Clamp(settings.DefaultPresetIndex,0,presets.Count-1)];var plan=DraftFactory.Create(a,services,preset.Setting,settings.DefaultBat);settings.Drafts.Add(new Draft {Plan=plan});Save();note.Text=settings.Drafts.Count(d=>d.RegisteredId==0)+"作品を選択中。「選択した作品を登録」でまとめて登録できます。";}
+ async Task AddAll(){
+  if(anime.Count==0){note.Text="先に年・季節を選び、一覧を取得してください。";return;}
+  if(anime.All(a=>settings.Drafts.Any(d=>d.Plan.AnimeId==a.Id))){note.Text="このリストはすべて追加済みです。";return;}
+  if(services.Count==0||presets.Count==0)await Connect();
+  var preset=presets[Math.Clamp(settings.DefaultPresetIndex,0,presets.Count-1)];var added=DraftFactory.CreateMissing(anime,settings.Drafts,services,preset.Setting,settings.DefaultBat);
+  settings.Drafts.AddRange(added);try{Save();}catch{foreach(var draft in added)settings.Drafts.Remove(draft);throw;}
+  ShowSeason();note.Text=added.Count+"作品を追加しました（追加済み "+(anime.Select(a=>a.Id).Distinct().Count()-added.Count)+"作品はそのまま）。「選択した作品を登録」でまとめて登録できます。";
+ }
  async Task Connect(){services=await edcb.Services();presets=RecordingPresets.Load(settings.EdcbFolder);var rules=await edcb.Rules();Save();note.Text=$"EDCB接続OK：{services.Count}局 / 録画プリセット{presets.Count}件 / 自動予約{rules.Count}件";}
  void ShowSettings(){
   var commonPreset=new Picker {Title="共通の録画プリセット",ItemsSource=presets.Count>0?presets.Select(p=>p.Name).ToList():new List<string>{"デフォルト（接続後に読み込み）"},SelectedIndex=presets.Count>0?Math.Clamp(settings.DefaultPresetIndex,0,presets.Count-1):0};
