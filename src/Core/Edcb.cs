@@ -21,8 +21,8 @@ public sealed class Edcb {
  public Edcb(IEdcbTransport transport=null){this.transport=transport??new LocalPipeTransport();}
  public static byte[] Pack(object value,bool versioned){var w=new CtrlCmdWriter(new MemoryStream(),versioned?(ushort)5:(ushort)0);if(versioned)w.Write((ushort)5);if(value!=null)w.Write(value);return w.Stream.ToArray();}
  static T Unpack<T>(byte[] data,bool versioned) where T:new(){using var ms=new MemoryStream(data,false);var r=new CtrlCmdReader(ms);if(versioned){ushort v=0;r.Read(ref v);r.Version=v;}object value=new T();r.Read(ref value);return (T)value;}
- public async Task<List<EpgServiceInfo>> Services(CancellationToken t=default)=>Unpack<List<EpgServiceInfo>>(await transport.Request(1021,[],t),false);
- public async Task<List<EpgAutoAddData>> Rules(CancellationToken t=default)=>Unpack<List<EpgAutoAddData>>(await transport.Request(2131,Pack(null,true),t),true);
+ public async Task<List<EpgServiceInfo>> Services(CancellationToken t=default)=>Unpack<List<EpgServiceInfo>>(await transport.Request(1021,[],t).ConfigureAwait(false),false);
+ public async Task<List<EpgAutoAddData>> Rules(CancellationToken t=default)=>Unpack<List<EpgAutoAddData>>(await transport.Request(2131,Pack(null,true),t).ConfigureAwait(false),true);
  public static long ServiceKey(EpgServiceInfo s)=>((long)s.ONID<<32)|((long)s.TSID<<16)|s.SID;
  public static EpgAutoAddData Build(RulePlan plan){
   string key=(plan.Keyword??"").Trim();if(key.Length==0||key.Length>500||key.Contains('\r')||key.Contains('\n')||key.StartsWith("^!{")||key.StartsWith("C!{")||key.StartsWith("D!{"))throw new ArgumentException("検索ワードを1～500文字で入力してください。");
@@ -33,13 +33,13 @@ public sealed class Edcb {
   return new EpgAutoAddData {searchInfo=new EpgSearchKeyInfo {andKey=key,notKey=(plan.Exclude??"").Trim(),titleOnlyFlag=1,serviceList=(plan.Services??[]).Distinct().Order().ToList()},recSetting=recording};
  }
  public static T Clone<T>(T value) where T:ICtrlCmdReadWrite,new()=>Unpack<T>(Pack(value,true),true);
- public async Task<List<ProgramMatch>> Preview(RulePlan plan,CancellationToken t=default){var rule=Build(plan);var events=Unpack<List<EpgEventInfo>>(await transport.Request(1025,Pack(new List<EpgSearchKeyInfo>{rule.searchInfo},false),t),false);return events.Select(e=>new ProgramMatch(e.ShortInfo?.event_name??"番組名なし",e.start_time,e.durationSec,e.original_network_id,e.transport_stream_id,e.service_id)).OrderBy(e=>e.Start).ToList();}
+ public async Task<List<ProgramMatch>> Preview(RulePlan plan,CancellationToken t=default){var rule=Build(plan);var events=Unpack<List<EpgEventInfo>>(await transport.Request(1025,Pack(new List<EpgSearchKeyInfo>{rule.searchInfo},false),t).ConfigureAwait(false),false);return events.Select(e=>new ProgramMatch(e.ShortInfo?.event_name??"番組名なし",e.start_time,e.durationSec,e.original_network_id,e.transport_stream_id,e.service_id)).OrderBy(e=>e.Start).ToList();}
  public async Task<uint> Register(RulePlan plan,string data,CancellationToken token=default){
   var rule=Build(plan);await gate.WaitAsync(token);try{
    Directory.CreateDirectory(data);using var lease=new FileStream(Path.Combine(data,"register.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
-   var before=await Rules(token);if(before.Any(r=>string.Equals(r.searchInfo.andKey.Trim().Normalize(),rule.searchInfo.andKey.Normalize(),StringComparison.OrdinalIgnoreCase)))throw new InvalidOperationException("同じ検索ワードの自動予約が既にあります。EPGTimerで既存条件を確認してください。重複登録はしません。");
-   await transport.Request(2132,Pack(new List<EpgAutoAddData>{rule},true),token);
-   var after=await Rules(token);var found=after.Where(r=>!before.Any(b=>b.dataID==r.dataID)&&r.searchInfo.andKey==rule.searchInfo.andKey&&r.recSetting.BatFilePath==rule.recSetting.BatFilePath).ToList();
+   var before=await Rules(token).ConfigureAwait(false);if(before.Any(r=>string.Equals(r.searchInfo.andKey.Trim().Normalize(),rule.searchInfo.andKey.Normalize(),StringComparison.OrdinalIgnoreCase)))throw new InvalidOperationException("同じ検索ワードの自動予約が既にあります。EPGTimerで既存条件を確認してください。重複登録はしません。");
+   await transport.Request(2132,Pack(new List<EpgAutoAddData>{rule},true),token).ConfigureAwait(false);
+   var after=await Rules(token).ConfigureAwait(false);var found=after.Where(r=>!before.Any(b=>b.dataID==r.dataID)&&r.searchInfo.andKey==rule.searchInfo.andKey&&r.recSetting.BatFilePath==rule.recSetting.BatFilePath).ToList();
    if(found.Count!=1)throw new IOException("送信は完了しましたが登録IDを確認できません。EPGTimerの自動予約を確認してください。再送信はしていません。");return found[0].dataID;
   }finally{gate.Release();}
  }

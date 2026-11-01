@@ -5,7 +5,7 @@ public record Anime(int Id,string Title,string Romaji,string Url,string Format,s
 public record CatalogResult(List<Anime> Items,DateTimeOffset Updated,bool Cached,string Notice);
 public sealed class Catalog {
  readonly HttpClient http;readonly string data;
- public Catalog(string data,HttpClient http=null){this.data=data;this.http=http??new HttpClient {Timeout=TimeSpan.FromSeconds(30)};this.http.DefaultRequestHeaders.UserAgent.ParseAdd("AnimeReserveFlow/0.1.2");}
+ public Catalog(string data,HttpClient http=null){this.data=data;this.http=http??new HttpClient {Timeout=TimeSpan.FromSeconds(30)};this.http.DefaultRequestHeaders.UserAgent.ParseAdd("AnimeReserveFlow/0.1.3");}
  public static string Season(int quarter)=>quarter switch {1=>"WINTER",2=>"SPRING",3=>"SUMMER",4=>"FALL",_=>throw new ArgumentException("季節は1～4です。")};
  public async Task<CatalogResult> Fetch(int year,int quarter,bool force=false,CancellationToken token=default){
   if(year<2000||year>2100)throw new ArgumentException("年は2000～2100を指定してください。");string season=Season(quarter);Directory.CreateDirectory(data);string file=Path.Combine(data,$"catalog-{year}-{quarter}.json");
