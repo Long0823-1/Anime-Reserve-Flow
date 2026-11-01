@@ -1,7 +1,7 @@
 using System.Text.Json;
 namespace AnimeReserve;
 public sealed class Draft {public RulePlan Plan {get;set;}public uint RegisteredId {get;set;}public string Result {get;set;}="未送信";}
-public sealed class Preferences {public string EdcbFolder {get;set;}="";public string DefaultBat {get;set;}="";public List<long> DefaultServices {get;set;}=[];public List<Draft> Drafts {get;set;}=[];}
+public sealed class Preferences {public string EdcbFolder {get;set;}="";public string DefaultBat {get;set;}="";public int DefaultPresetIndex {get;set;}=0;public List<long> DefaultServices {get;set;}=[];public List<Draft> Drafts {get;set;}=[];}
 public static class LocalStore {
  public static Anime ManualAnime(string title,IEnumerable<int> existing){title=(title??"").Trim();if(title.Length==0||title.Length>500)throw new ArgumentException("作品名を1～500文字で入力してください。");int id=checked(Math.Min(0,existing.DefaultIfEmpty(0).Min())-1);return new Anime(id,title,"","","MANUAL","");}
  public static readonly JsonSerializerOptions Json=new(){IncludeFields=true,WriteIndented=true};
