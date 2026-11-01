@@ -15,7 +15,8 @@ var decoded=Read<List<EpgAutoAddData>>(Edcb.Pack(new List<EpgAutoAddData>{rule},
 Check(decoded.recSetting.BatFilePath==bat&&decoded.recSetting.RecFolderList[0].RecNamePlugIn.Contains("Macro")&&decoded.recSetting.EndMargine==20&&decoded.recSetting.ServiceMode==17,"protocol preserves BAT, plugins, margin and service mode");
 Check((await edcb.Preview(plan)).Single().Title=="テスト作品 第1話","EPG preview protocol");
 uint id=await edcb.Register(plan,root);Check(id==1&&mock.AddCalls==1,"auto reservation added and read back verified");
-bool duplicate=false;try{await edcb.Register(plan,root);}catch(InvalidOperationException){duplicate=true;}Check(duplicate&&mock.AddCalls==1,"duplicate keyword cannot be submitted twice");
+uint repeated=await edcb.Register(plan,root);Check(repeated==id&&mock.AddCalls==1,"identical existing keyword rule is acknowledged without submitting twice");
+var different=plan with {Recording=Edcb.Clone(plan.Recording)};different.Recording.Priority=5;bool conflict=false;try{await edcb.Register(different,root);}catch(InvalidOperationException){conflict=true;}Check(conflict&&mock.AddCalls==1,"same keyword with different recording settings remains a visible conflict");
 foreach(var bad in new[]{plan with {Keyword=""},plan with {Services=[]},plan with {Keyword="^!{999}test"},plan with {Recording=new RecSettingData {RecMode=5}},plan with {Recording=new RecSettingData {BatFilePath=Path.Combine(root,"missing.bat")}}}){bool fail=false;try{Edcb.Build(bad);}catch(ArgumentException){fail=true;}Check(fail,"invalid draft blocked");}
 var pref=new Preferences {EdcbFolder=root,Drafts=[new Draft {Plan=plan,RegisteredId=1}]};LocalStore.Save(root,pref);Check(LocalStore.Load(root).Drafts[0].Plan.Recording.BatFilePath==bat,"draft and BAT survive restart");
 var allServices=new[]{new EpgServiceInfo {ONID=1,TSID=2,SID=3},new EpgServiceInfo {ONID=1,TSID=2,SID=4},new EpgServiceInfo {ONID=1,TSID=2,SID=3}};
@@ -45,15 +46,40 @@ Check(bulkExisting.Count==1&&bulkExisting[0].RegisteredId==99&&bulkExisting[0].P
 batch[0].Plan.Recording.Priority=5;Check(batch[1].Plan.Recording.Priority==rec.Priority,"bulk recording snapshots are independent");
 Check(DraftFactory.CreateMissing(bulkAnime,bulkExisting.Concat(batch),allServices,rec,bat).Count==0,"repeating bulk add creates no duplicates");
 bool invalidBatch=false;try{DraftFactory.CreateMissing(new[]{new Anime(4,"valid","","","TV",""),new Anime(5,"","","","TV","")},bulkExisting,allServices,rec,bat);}catch(ArgumentException){invalidBatch=true;}Check(invalidBatch&&bulkExisting.Count==1&&bulkExisting[0].RegisteredId==99,"invalid bulk draft cannot partially modify selection");
+// A conflict or invalid BAT must not leave all later selected works unsent.
+var batchMock=new FakeEdcb {FailKeyword="通信失敗"};var batchEdcb=new Edcb(batchMock);
+RulePlan BatchPlan(int number,string word)=>DraftFactory.WithAllChannels(plan with {AnimeId=number,AnimeTitle=word,Keyword=word},allServices);
+var conflictPlan=BatchPlan(101,"設定違い");var conflictRule=Edcb.Build(conflictPlan);conflictRule.recSetting.Priority=5;conflictRule.dataID=10;batchMock.Rules.Add(conflictRule);
+var exactPlan=BatchPlan(102,"登録済み");var exactRule=Edcb.Build(exactPlan);exactRule.dataID=20;batchMock.Rules.Add(exactRule);
+var invalid=BatchPlan(105,"BATなしファイル") with {Recording=Edcb.Clone(plan.Recording)};invalid.Recording.BatFilePath=Path.Combine(root,"absent.bat");
+var batchPrefs=new Preferences {Drafts=new[]{conflictPlan,BatchPlan(103,"新規A"),exactPlan,invalid,BatchPlan(106,"通信失敗"),BatchPlan(107,"新規B")}.Select(p=>new Draft {Plan=p}).ToList()};int saves=0;var progress=new List<int>();
+var report=await RegistrationBatch.Run(batchEdcb,batchPrefs,allServices,root,()=>{saves++;return Task.CompletedTask;},(i,n,d)=>progress.Add(i));
+Check(report.Added==2&&report.Existing==1&&report.Failed==3&&batchMock.AddCalls==2,"batch continues past conflict, invalid BAT and communication failure");
+Check(saves==6&&progress.SequenceEqual(Enumerable.Range(1,6))&&batchPrefs.Drafts.Last().RegisteredId>0,"every per-work result is saved and later works are processed");
+Check(batchPrefs.Drafts[0].RegisteredId==0&&batchPrefs.Drafts[0].Result.StartsWith("登録失敗：")&&report.Message.Contains("失敗 3作品"),"partial failure remains visible in draft and final summary");
+Check(batchPrefs.Drafts[2].RegisteredId==20&&batchPrefs.Drafts[2].Result.Contains("条件一致")&&conflictRule.recSetting.Priority==5,"matching existing ID recovered without overwriting differing server rule");
+Check(report.Message.Contains("新規 2作品")&&report.Message.Contains("既存条件と一致 1作品"),"summary distinguishes new registrations and confirmed existing conditions");
+var interruptedMock=new FakeEdcb {FailReadbackOnce=true};var interruptedEdcb=new Edcb(interruptedMock);bool uncertain=false;
+try{await interruptedEdcb.Register(plan,root);}catch(IOException){uncertain=true;}
+var recovered=await interruptedEdcb.RegisterDetailed(plan,root);Check(uncertain&&recovered.AlreadyExists&&recovered.Id>0&&interruptedMock.AddCalls==1,"retry after lost acknowledgement reconciles existing rule without duplicate add");
+var alteredMock=new FakeEdcb {AlterReadback=true};bool mismatch=false;try{await new Edcb(alteredMock).Register(plan,root);}catch(IOException){mismatch=true;}Check(mismatch,"changed readback recording settings never produce a false success");
+var saveFailureMock=new FakeEdcb();bool saveFailure=false;
+try{await RegistrationBatch.Run(new Edcb(saveFailureMock),new Preferences {Drafts=[new(){Plan=BatchPlan(110,"保存A")},new(){Plan=BatchPlan(111,"保存B")}]},allServices,root,()=>throw new IOException("disk failure"),(i,n,d)=>{});}catch(IOException){saveFailure=true;}
+Check(saveFailure&&saveFailureMock.AddCalls==1,"failed local persistence stops additional writes instead of losing confirmed IDs");
+if(args.Contains("--audit-drafts")){
+ var stored=LocalStore.Load(args[Array.IndexOf(args,"--audit-drafts")+1]);var liveEdcb=new Edcb();var liveServices=await liveEdcb.Services();var liveRules=await liveEdcb.Rules();
+ var audit=stored.Drafts.Select(d=>{var wanted=Edcb.Build(d.RegisteredId>0?d.Plan:DraftFactory.WithAllChannels(d.Plan,liveServices));var matching=liveRules.Where(r=>r.searchInfo.andKey.Trim().Normalize().Equals(d.Plan.Keyword.Trim().Normalize(),StringComparison.OrdinalIgnoreCase)).ToList();return new {title=d.Plan.AnimeTitle,localId=d.RegisteredId,result=d.Result,ids=matching.Select(r=>r.dataID).ToList(),exact=matching.Count==1&&Edcb.Equivalent(matching[0],wanted)};}).ToList();
+ string output=args[Array.IndexOf(args,"--audit-output")+1];File.WriteAllText(output,JsonSerializer.Serialize(audit,LocalStore.Json));Console.WriteLine("READ ONLY AUDIT "+audit.Count+" works / "+liveRules.Count+" rules / unsent exact "+audit.Count(x=>x.localId==0&&x.exact)+" / unsent missing "+audit.Count(x=>x.localId==0&&x.ids.Count==0)+" / conflicts "+audit.Count(x=>x.localId==0&&x.ids.Count>0&&!x.exact));
+}
 if(args.Contains("--live-catalog")){var live=await new Catalog(Path.Combine(root,"Live")).Fetch(2026,4);Check(live.Items.Count>0,"actual AniList season fetch");Console.WriteLine("LIVE CATALOG "+live.Items.Count+" works");}
 if(args.Contains("--read-edcb")){var local=new Edcb();var channels=await local.Services();var rules=await local.Rules();Check(channels.Count>0,"local EpgTimerSrv read-only pipe connection");Console.WriteLine("EDCB READ ONLY "+channels.Count+" channels / "+rules.Count+" rules");int folderArg=Array.IndexOf(args,"--edcb-folder");if(folderArg>=0){var real=RecordingPresets.Load(args[folderArg+1]);Check(real.Count>0,"actual EDCB recording presets read");}}
 Console.WriteLine("ALL PASS "+count+" fixtures "+root);
 static T Read<T>(byte[] data,bool versioned) where T:new(){using var ms=new MemoryStream(data);var r=new CtrlCmdReader(ms);if(versioned){ushort v=0;r.Read(ref v);r.Version=v;}object x=new T();r.Read(ref x);return (T)x;}
 sealed class FakeEdcb:IEdcbTransport {
- public List<EpgAutoAddData> Rules=[];public int AddCalls;public bool NoHits;
+ public List<EpgAutoAddData> Rules=[];public int AddCalls;public bool NoHits;public string FailKeyword="";public bool FailReadbackOnce,AlterReadback;bool readbackPending;
  public Task<byte[]> Request(uint command,byte[] body,CancellationToken token=default){
-  if(command==2131)return Task.FromResult(Edcb.Pack(Rules,true));
-  if(command==2132){using var ms=new MemoryStream(body);var r=new CtrlCmdReader(ms);ushort v=0;r.Read(ref v);r.Version=v;object items=new List<EpgAutoAddData>();r.Read(ref items);foreach(var rule in (List<EpgAutoAddData>)items){rule.dataID=(uint)Rules.Count+1;Rules.Add(rule);}AddCalls++;return Task.FromResult(Array.Empty<byte>());}
+  if(command==2131){if(readbackPending){readbackPending=false;throw new IOException("lost readback");}return Task.FromResult(Edcb.Pack(Rules,true));}
+  if(command==2132){using var ms=new MemoryStream(body);var r=new CtrlCmdReader(ms);ushort v=0;r.Read(ref v);r.Version=v;object items=new List<EpgAutoAddData>();r.Read(ref items);foreach(var rule in (List<EpgAutoAddData>)items){if(rule.searchInfo.andKey==FailKeyword)throw new IOException("simulated send failure");rule.dataID=(uint)Rules.Count+1;if(AlterReadback)rule.recSetting.Priority++;Rules.Add(rule);}AddCalls++;if(FailReadbackOnce){readbackPending=true;FailReadbackOnce=false;}return Task.FromResult(Array.Empty<byte>());}
   if(command==1025&&NoHits)return Task.FromResult(Edcb.Pack(new List<EpgEventInfo>(),false));
   if(command==1025)return Task.FromResult(Edcb.Pack(new List<EpgEventInfo>{new(){ShortInfo=new(){event_name="テスト作品 第1話"},start_time=new DateTime(2026,11,1),durationSec=1800}},false));
   throw new Exception("unexpected command "+command);

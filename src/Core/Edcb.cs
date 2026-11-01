@@ -16,6 +16,7 @@ public sealed class LocalPipeTransport : IEdcbTransport {
 }
 public record ProgramMatch(string Title,DateTime Start,uint Seconds,ushort Onid,ushort Tsid,ushort Sid);
 public record RulePlan(int AnimeId,string AnimeTitle,string Keyword,string Exclude,List<long> Services,RecSettingData Recording);
+public record RegistrationReceipt(uint Id,bool AlreadyExists);
 public sealed class Edcb {
  readonly IEdcbTransport transport;readonly SemaphoreSlim gate=new(1);
  public Edcb(IEdcbTransport transport=null){this.transport=transport??new LocalPipeTransport();}
@@ -34,13 +35,21 @@ public sealed class Edcb {
  }
  public static T Clone<T>(T value) where T:ICtrlCmdReadWrite,new()=>Unpack<T>(Pack(value,true),true);
  public async Task<List<ProgramMatch>> Preview(RulePlan plan,CancellationToken t=default){var rule=Build(plan);var events=Unpack<List<EpgEventInfo>>(await transport.Request(1025,Pack(new List<EpgSearchKeyInfo>{rule.searchInfo},false),t).ConfigureAwait(false),false);return events.Select(e=>new ProgramMatch(e.ShortInfo?.event_name??"番組名なし",e.start_time,e.durationSec,e.original_network_id,e.transport_stream_id,e.service_id)).OrderBy(e=>e.Start).ToList();}
- public async Task<uint> Register(RulePlan plan,string data,CancellationToken token=default){
+ static string Keyword(string key)=>(key??"").Trim().Normalize().ToUpperInvariant();
+ public static bool Equivalent(EpgAutoAddData first,EpgAutoAddData second){
+  var a=Clone(first.searchInfo);var b=Clone(second.searchInfo);a.andKey=Keyword(a.andKey);b.andKey=Keyword(b.andKey);a.serviceList=a.serviceList.Distinct().Order().ToList();b.serviceList=b.serviceList.Distinct().Order().ToList();
+  return Pack(a,true).SequenceEqual(Pack(b,true))&&Pack(first.recSetting,true).SequenceEqual(Pack(second.recSetting,true));
+ }
+ public async Task<uint> Register(RulePlan plan,string data,CancellationToken token=default)=>(await RegisterDetailed(plan,data,token).ConfigureAwait(false)).Id;
+ public async Task<RegistrationReceipt> RegisterDetailed(RulePlan plan,string data,CancellationToken token=default){
   var rule=Build(plan);await gate.WaitAsync(token);try{
    Directory.CreateDirectory(data);using var lease=new FileStream(Path.Combine(data,"register.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
-   var before=await Rules(token).ConfigureAwait(false);if(before.Any(r=>string.Equals(r.searchInfo.andKey.Trim().Normalize(),rule.searchInfo.andKey.Normalize(),StringComparison.OrdinalIgnoreCase)))throw new InvalidOperationException("同じ検索ワードの自動予約が既にあります。EPGTimerで既存条件を確認してください。重複登録はしません。");
+   var before=await Rules(token).ConfigureAwait(false);var existing=before.Where(r=>Keyword(r.searchInfo.andKey)==Keyword(rule.searchInfo.andKey)).ToList();
+   if(existing.Count==1&&existing[0].dataID>0&&Equivalent(existing[0],rule))return new(existing[0].dataID,true);
+   if(existing.Count>0)throw new InvalidOperationException("同じ検索ワードの自動予約が既にありますが、録画設定・BAT・放送局などの条件が異なるか複数あります。EPGTimerのキーワード自動予約で確認してください（ID："+string.Join(", ",existing.Select(r=>r.dataID))+"）。既存条件は変更していません。");
    await transport.Request(2132,Pack(new List<EpgAutoAddData>{rule},true),token).ConfigureAwait(false);
-   var after=await Rules(token).ConfigureAwait(false);var found=after.Where(r=>!before.Any(b=>b.dataID==r.dataID)&&r.searchInfo.andKey==rule.searchInfo.andKey&&r.recSetting.BatFilePath==rule.recSetting.BatFilePath).ToList();
-   if(found.Count!=1)throw new IOException("送信は完了しましたが登録IDを確認できません。EPGTimerの自動予約を確認してください。再送信はしていません。");return found[0].dataID;
+   var after=await Rules(token).ConfigureAwait(false);var found=after.Where(r=>r.dataID>0&&!before.Any(b=>b.dataID==r.dataID)&&Equivalent(r,rule)).ToList();
+   if(found.Count!=1)throw new IOException("送信は完了しましたが登録IDと条件を確認できません。EPGTimerのキーワード自動予約を確認してください。再送信はしていません。");return new(found[0].dataID,false);
   }finally{gate.Release();}
  }
 }
