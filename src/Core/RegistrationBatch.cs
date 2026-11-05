@@ -9,7 +9,7 @@ public static class RegistrationBatch {
   for(int i=0;i<pending.Count;i++) {
    token.ThrowIfCancellationRequested();var draft=pending[i];progress?.Invoke(i+1,pending.Count,draft);
    try {
-    draft.Plan=DraftFactory.WithAllChannels(draft.Plan,channels);
+    draft.Plan=DraftFactory.WithSelectedChannels(draft.Plan,channels);
     var result=await edcb.RegisterDetailed(draft.Plan,data,token);draft.RegisteredId=result.Id;draft.Result=result.AlreadyExists?"既存の自動予約と条件一致（確認済み）":"登録完了（EDCBから読戻し確認済み）";
     if(result.AlreadyExists)existing++;else added++;
    }catch(OperationCanceledException){throw;}
