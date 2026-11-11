@@ -63,3 +63,9 @@ dotnet run --project tests/Tests.csproj -c Release
 ```
 
 [Ko-fiで開発を支援](https://ko-fi.com/long0823)
+
+## 関連記事
+
+ブログ「knowledge-storage.info」で関連する解説記事を公開しています。
+
+- [新作アニメをまとめて録画予約。EPGTimer連携アプリ「Anime Reserve Flow」を作った](https://knowledge-storage.info/2026/11/01/epgtimer-anime-reserve-flow/)
